@@ -10,33 +10,43 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiJamesEvolveRouteImport } from './routes/api/james/evolve'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiJamesEvolveRoute = ApiJamesEvolveRouteImport.update({
+  id: '/api/james/evolve',
+  path: '/api/james/evolve',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/james/evolve': typeof ApiJamesEvolveRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/james/evolve': typeof ApiJamesEvolveRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/james/evolve': typeof ApiJamesEvolveRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/api/james/evolve'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/api/james/evolve'
+  id: '__root__' | '/' | '/api/james/evolve'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiJamesEvolveRoute: typeof ApiJamesEvolveRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +58,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/james/evolve': {
+      id: '/api/james/evolve'
+      path: '/api/james/evolve'
+      fullPath: '/api/james/evolve'
+      preLoaderRoute: typeof ApiJamesEvolveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiJamesEvolveRoute: ApiJamesEvolveRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

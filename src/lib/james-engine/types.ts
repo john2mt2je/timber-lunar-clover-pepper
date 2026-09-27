@@ -47,6 +47,15 @@ export type ThinkProgress = {
   lineageEnd: "cycle" | "mate" | "draw" | "horizon" | null;
 };
 
+/** A move the hive has learned from its stored games for a given position. */
+export type LearnedMove = {
+  /** UCI, e.g. "e2e4" or "e7e8q". */
+  move: string;
+  plays: number;
+  /** Average points for the side to move (0..1). */
+  rate: number;
+};
+
 export type ThinkOptions = {
   /** Fixed minimum search time in milliseconds. */
   minMs?: number;
@@ -58,6 +67,12 @@ export type ThinkOptions = {
   allowBook?: boolean;
   /** Explicit depth ceiling for a level. */
   maxDepth?: number;
+  /** Centipawns a draw costs the side to move at the root — drives it to play for a win. */
+  contempt?: number;
+  /** Learned root moves from the hive's compressed game tree. */
+  learned?: LearnedMove[];
+  /** Skip lineage projection and throttle progress (self-play speed). */
+  lite?: boolean;
 };
 
 export type ThinkRequest = {
@@ -68,14 +83,14 @@ export type ThinkRequest = {
 };
 
 export type WorkerIn =
-  | { type: "think"; req: ThinkRequest }
+  | { type: "think"; req: ThinkRequest; id?: number }
   | { type: "stop" }
   | { type: "newGame" }
   | { type: "setGenome"; genome: Genome };
 
 export type WorkerOut =
-  | { type: "progress"; data: ThinkProgress }
-  | { type: "bestmove"; data: ThinkProgress }
+  | { type: "progress"; data: ThinkProgress; id?: number }
+  | { type: "bestmove"; data: ThinkProgress; id?: number }
   | { type: "ready" };
 
 export type GenomeTerms = {
@@ -106,31 +121,56 @@ export const MODE_MS: Record<ThinkMode, { min: number; max: number; label: strin
   sure: { min: 2800, max: 14000, label: "Win hunt", hint: "No stable-eval early stop" },
 };
 
-export const ENGINE_VERSION = "2.0.0-continuous";
+export const ENGINE_VERSION = "3.0.0-hive";
 
 export type JamesLevel = {
   level: number;
   name: string;
+  tier: "Novice" | "Club" | "Expert" | "Master" | "Hive" | "Singularity";
+  /** Fixed think time per move for every lane. */
   moveMs: number;
   maxDepth: number;
-  maxPlies: number;
+  /** Parallel James processes, each running a different variant. */
   lanes: number;
+  /** Draw penalty in centipawns — high levels refuse draws and hunt the win. */
+  contempt: number;
+  /** Probability of playing a random candidate instead of the hive's choice. */
+  blunder: number;
+  /** Use the compressed game tree learned from stored self-play games. */
+  learned: boolean;
 };
 
-export const JAMES_LEVELS: JamesLevel[] = [
-  { level: 1, name: "Seed", moveMs: 35, maxDepth: 5, maxPlies: 50, lanes: 3 },
-  { level: 2, name: "Foundry", moveMs: 50, maxDepth: 6, maxPlies: 60, lanes: 3 },
-  { level: 3, name: "Pressure", moveMs: 65, maxDepth: 7, maxPlies: 70, lanes: 4 },
-  { level: 4, name: "Tactical", moveMs: 80, maxDepth: 9, maxPlies: 80, lanes: 4 },
-  { level: 5, name: "Predator", moveMs: 100, maxDepth: 10, maxPlies: 90, lanes: 5 },
-  { level: 6, name: "Hunter", moveMs: 120, maxDepth: 12, maxPlies: 100, lanes: 5 },
-  { level: 7, name: "Forge", moveMs: 145, maxDepth: 14, maxPlies: 110, lanes: 6 },
-  { level: 8, name: "Apex", moveMs: 170, maxDepth: 16, maxPlies: 120, lanes: 6 },
-  { level: 9, name: "Convergence", moveMs: 200, maxDepth: 18, maxPlies: 125, lanes: 7 },
-  { level: 10, name: "Siege", moveMs: 230, maxDepth: 20, maxPlies: 130, lanes: 7 },
-  { level: 11, name: "Overmind", moveMs: 260, maxDepth: 22, maxPlies: 135, lanes: 8 },
-  { level: 12, name: "Solve", moveMs: 300, maxDepth: 24, maxPlies: 140, lanes: 8 },
-];
+const LEVEL_NAMES = [
+  "Seed", "Sprout", "Foundry", "Pressure", "Tactical", "Predator",
+  "Hunter", "Forge", "Apex", "Convergence", "Siege", "Overmind",
+  "Swarm", "Lattice", "Cascade", "Hawthorne", "Robinson", "Leviathan",
+  "Eclipse", "Singular", "Omniscient", "Absolute", "Terminal", "Solve",
+] as const;
+
+function tierFor(level: number): JamesLevel["tier"] {
+  if (level <= 4) return "Novice";
+  if (level <= 8) return "Club";
+  if (level <= 12) return "Expert";
+  if (level <= 16) return "Master";
+  if (level <= 20) return "Hive";
+  return "Singularity";
+}
+
+export const JAMES_LEVELS: JamesLevel[] = LEVEL_NAMES.map((name, i) => {
+  const level = i + 1;
+  const t = i / (LEVEL_NAMES.length - 1);
+  return {
+    level,
+    name,
+    tier: tierFor(level),
+    moveMs: Math.round(60 + Math.pow(t, 1.8) * 7940),
+    maxDepth: Math.round(2 + t * 62),
+    lanes: Math.min(8, 1 + Math.floor(i / 3)),
+    contempt: Math.round(t * 80),
+    blunder: Math.max(0, +(0.35 - i * 0.05).toFixed(2)),
+    learned: level >= 6,
+  };
+});
 
 export const TT_SIZE = 1 << 20;
 export const TT_MASK = TT_SIZE - 1;

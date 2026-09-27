@@ -11,6 +11,7 @@ import {
   type JamesStats,
   type RootLine,
   type ThinkMode,
+  type ThinkOptions,
   type ThinkProgress,
 } from "./types";
 
@@ -45,6 +46,22 @@ let unique = 0;
 const cyclePlySet = new Set<number>();
 let genome: Genome;
 let rootFen = "";
+let rootColor: "w" | "b" = "w";
+let contempt = 0;
+let rootLearned = new Map<number, number>();
+
+/** Draws cost the root side `contempt` centipawns, so the hive plays for the win. */
+function drawScore(chess: Chess): number {
+  return chess.turn() === rootColor ? -contempt : contempt;
+}
+
+function uciToPacked(uci: string): number {
+  if (uci.length < 4) return 0;
+  const from = sqIndex(uci.slice(0, 2));
+  const to = sqIndex(uci.slice(2, 4));
+  const promo = uci[4] ? ({ n: 1, b: 2, r: 3, q: 4 } as Record<string, number>)[uci[4]] ?? 0 : 0;
+  return from | (to << 6) | (promo << 12);
+}
 
 function splitHash(hex: string): { index: number; verify: number } {
   let n = 0n;
@@ -130,6 +147,10 @@ function orderMoves(moves: Move[], ttPacked: number, ply: number) {
     else if (packed === killerA[ply]) s = 80_000;
     else if (packed === killerB[ply]) s = 70_000;
     else s = history[(sqIndex(m.from) << 6) | sqIndex(m.to)] ?? 0;
+    if (ply === 0 && s < 1_000_000) {
+      const learned = rootLearned.get(packed);
+      if (learned !== undefined) s += 60_000 + learned;
+    }
     scores[i] = s;
   }
   for (let i = 1; i < moves.length; i++) {
@@ -190,8 +211,9 @@ function search(
   if (ply > seldepth) seldepth = ply;
   nodes++;
 
-  if (ply > 0 && chess.isThreefoldRepetition()) return 0;
-  if (ply > 0 && chess.isDrawByFiftyMoves()) return 0;
+  if (ply > 0 && (chess.isThreefoldRepetition() || chess.isDrawByFiftyMoves() || chess.isInsufficientMaterial())) {
+    return drawScore(chess);
+  }
 
   const hex = chess.hash();
   const probed = ttProbe(hex, ply);
@@ -217,7 +239,7 @@ function search(
 
   const moves = chess.moves({ verbose: true });
   if (moves.length === 0) {
-    return inCheck ? -MATE + ply : 0;
+    return inCheck ? -MATE + ply : drawScore(chess);
   }
 
   orderMoves(moves, probed?.move ?? 0, ply);
@@ -269,7 +291,7 @@ function search(
     }
   }
 
-  if (legal === 0) return inCheck ? -MATE + ply : 0;
+  if (legal === 0) return inCheck ? -MATE + ply : drawScore(chess);
   ttStore(hex, depth, ply, best, flag, bestPacked);
   return best;
 }
@@ -370,9 +392,10 @@ function snapshot(
   start: number,
   sure: boolean,
   pvOverride?: string[],
+  lite = false,
 ): ThinkProgress {
-  const pv = pvOverride ?? collectPv(rootFen, 28);
-  const lineage = projectLineage(rootFen, pv);
+  const pv = pvOverride ?? collectPv(rootFen, lite ? 8 : 28);
+  const lineage = lite ? { line: [] as string[], end: null } : projectLineage(rootFen, pv);
   return {
     depth,
     seldepth,
@@ -426,6 +449,14 @@ export function think(
   cyclePlySet.clear();
 
   const chess = new Chess(fen);
+  rootColor = chess.turn();
+  contempt = Math.max(0, Math.min(200, options.contempt ?? 0));
+  rootLearned = new Map();
+  for (const l of options.learned ?? []) {
+    const packed = uciToPacked(l.move);
+    if (packed) rootLearned.set(packed, Math.round((l.rate - 0.5) * 20_000 + Math.min(l.plays, 400) * 10));
+  }
+  const lite = options.lite === true;
   const start = performance.now();
   const cfg = MODE_MS[mode];
   const minMs = Math.max(1, options.minMs ?? cfg.min);
@@ -508,8 +539,8 @@ export function think(
       if (tail.length === 3 && tail.every((s) => Math.abs(s - tail[0]!) < 22)) sure = true;
     }
 
-    const snap = snapshot(chess, depth, score, bestMove, lines, start, sure);
-    if (performance.now() - lastProgress > 40 || sure || depth <= 3) {
+    const snap = snapshot(chess, depth, score, bestMove, lines, start, sure, undefined, lite);
+    if (!lite && (performance.now() - lastProgress > 40 || sure || depth <= 3)) {
       onProgress(snap);
       lastProgress = performance.now();
     }
@@ -522,5 +553,5 @@ export function think(
     }
   }
 
-  return snapshot(chess, lastScores.length, bestScore, bestMove, lines, start, true);
+  return snapshot(chess, lastScores.length, bestScore, bestMove, lines, start, true, undefined, lite);
 }

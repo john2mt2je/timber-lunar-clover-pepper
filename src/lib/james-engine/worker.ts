@@ -17,10 +17,15 @@ self.onmessage = (e: MessageEvent<WorkerIn>) => {
     return;
   }
   if (m.type === "think") {
-    const result = think(m.req.fen, m.req.mode, m.req.genome, (p) => {
-      post({ type: "progress", data: p });
-    });
-    post({ type: "bestmove", data: result });
+    const id = m.id;
+    const result = think(
+      m.req.fen,
+      m.req.mode,
+      m.req.genome,
+      (p) => post({ type: "progress", data: p, id }),
+      m.req.options,
+    );
+    post({ type: "bestmove", data: result, id });
   }
 };
 

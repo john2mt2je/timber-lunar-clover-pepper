@@ -1,42 +1,39 @@
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chess, type PieceSymbol, type Square } from "chess.js";
 import { RotateCcw, Swords, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Board } from "./Board";
+import { HivePanel } from "./HivePanel";
 import { JamesGraph } from "./JamesGraph";
+import { LevelPicker } from "./LevelPicker";
 import { Promotion, type PendingPromo } from "./Promotion";
 import { Button } from "@/components/ui/button";
-import { createEngine, type EngineHandle } from "@/lib/james-engine/client";
-import { defaultGenome, evolveGenome, loadGenome } from "@/lib/james-engine/evolve";
-import {
-  MODE_MS,
-  type Genome,
-  type ThinkMode,
-  type ThinkProgress,
-} from "@/lib/james-engine/types";
+import { Arena, type ArenaStats } from "@/lib/james-engine/arena";
+import { getHive, getLearned, submitSelfPlay } from "@/lib/james-engine/hive.functions";
+import { HivePool, type HiveDecision } from "@/lib/james-engine/hive-pool";
+import { ENGINE_VERSION, JAMES_LEVELS, type ThinkProgress } from "@/lib/james-engine/types";
 import { cn } from "@/lib/utils";
 
 type Screen = "menu" | "play";
 type Side = "w" | "b";
 type Phase = "player" | "engine" | "over";
 
-function fmtScore(p: ThinkProgress | null) {
-  if (!p) return "—";
-  if (p.mate !== null) return p.mate > 0 ? `M${p.mate}` : `M${p.mate}`;
-  const n = p.score / 100;
+const queryClient = new QueryClient();
+
+function fmtScore(score: number, mate: number | null) {
+  if (mate !== null) return `M${mate}`;
+  const n = score / 100;
   return `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
 }
 
-function statusText(chess: Chess, phase: Phase, playerSide: Side) {
-  if (chess.isCheckmate()) {
-    const winner = chess.turn() === "w" ? "Black" : "White";
-    return `${winner} mates`;
-  }
+function statusText(chess: Chess, phase: Phase, playerSide: Side, lanes: number) {
+  if (chess.isCheckmate()) return `${chess.turn() === "w" ? "Black" : "White"} mates`;
   if (chess.isStalemate()) return "Stalemate";
   if (chess.isThreefoldRepetition()) return "Draw by repetition";
   if (chess.isInsufficientMaterial()) return "Draw — insufficient material";
-  if (chess.isDrawByFiftyMoves()) return "Draw — 50 moves";
   if (chess.isDraw()) return "Draw";
-  if (phase === "engine") return "James is growing the graph";
+  if (phase === "over") return "You resigned";
+  if (phase === "engine") return lanes > 1 ? `${lanes} James processes searching` : "James is searching";
   if (chess.isCheck()) return "Check";
   return chess.turn() === playerSide ? "Your move" : "Waiting";
 }
@@ -56,14 +53,26 @@ function playTick(kind: "move" | "capture" | "end") {
     o.stop(ctx.currentTime + 0.13);
     o.onended = () => ctx.close();
   } catch {
-    /* autoplay */
+    /* autoplay blocked */
   }
 }
 
 export function JamesApp() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <JamesInner />
+    </QueryClientProvider>
+  );
+}
+
+function JamesInner() {
+  const qc = useQueryClient();
+  const { data: hive } = useQuery({ queryKey: ["hive"], queryFn: () => getHive(), refetchInterval: 8000 });
+
   const [screen, setScreen] = useState<Screen>("menu");
+  const [levelNo, setLevelNo] = useState(12);
+  const level = JAMES_LEVELS[levelNo - 1]!;
   const [playerSide, setPlayerSide] = useState<Side>("w");
-  const [mode, setMode] = useState<ThinkMode>("sure");
   const [chess] = useState(() => new Chess());
   const [, bump] = useState(0);
   const refresh = () => bump((n) => n + 1);
@@ -71,98 +80,92 @@ export function JamesApp() {
   const [pending, setPending] = useState<PendingPromo | null>(null);
   const [phase, setPhase] = useState<Phase>("player");
   const [progress, setProgress] = useState<ThinkProgress | null>(null);
-  const [genome, setGenome] = useState<Genome>(() =>
-    typeof window === "undefined" ? defaultGenome() : loadGenome(),
-  );
+  const [decision, setDecision] = useState<HiveDecision | null>(null);
   const [flipped, setFlipped] = useState(false);
-  const engineRef = useRef<EngineHandle | null>(null);
-  const phaseRef = useRef<Phase>("player");
-  const evolvedForPgn = useRef<string | null>(null);
-  const resignedRef = useRef(false);
+  const [arenaOn, setArenaOn] = useState(true);
+  const [arenaStats, setArenaStats] = useState<ArenaStats>({ played: 0, gamesPerMin: 0, running: 0, lastGame: null });
+
+  const poolRef = useRef<HivePool | null>(null);
+  const arenaRef = useRef<Arena | null>(null);
+  const turnToken = useRef(0);
 
   useEffect(() => {
-    phaseRef.current = phase;
-  }, [phase]);
-
-  useEffect(() => {
-    const engine = createEngine({
-      onProgress: (p) => setProgress(p),
-      onBest: (p) => {
-        setProgress(p);
-        if (phaseRef.current !== "engine") return;
-        const mv = p.bestMove;
-        if (!mv) {
-          setPhase("over");
-          return;
-        }
-        try {
-          const played = chess.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
-          playTick(played.captured ? "capture" : "move");
-          refresh();
-          if (chess.isGameOver()) {
-            setPhase("over");
-            playTick("end");
-          } else {
-            setPhase("player");
-          }
-        } catch {
-          setPhase("player");
-        }
+    const pool = new HivePool((p) => setProgress(p));
+    poolRef.current = pool;
+    const arena = new Arena(
+      async (games) => {
+        await submitSelfPlay({ data: { games } });
+        void qc.invalidateQueries({ queryKey: ["hive"] });
       },
-    });
-    engineRef.current = engine;
-    return () => engine.terminate();
-  }, [chess]);
+      setArenaStats,
+    );
+    arenaRef.current = arena;
+    return () => {
+      pool.terminate();
+      arena.stop();
+    };
+  }, [qc]);
 
   useEffect(() => {
-    if (screen !== "play" || phase !== "over") return;
-    const pgn = chess.pgn();
-    if (evolvedForPgn.current === pgn) return;
-    evolvedForPgn.current = pgn;
-    let result: "win" | "loss" | "draw" = "draw";
-    if (resignedRef.current) {
-      result = "win";
-    } else if (chess.isCheckmate()) {
-      const engineColor = playerSide === "w" ? "b" : "w";
-      const winner = chess.turn() === "w" ? "b" : "w";
-      result = winner === engineColor ? "win" : "loss";
-    }
-    const next = evolveGenome(genome, result);
-    setGenome(next);
-  }, [screen, phase, chess, genome, playerSide]);
+    const arena = arenaRef.current;
+    if (!arena || !hive?.variants.length) return;
+    arena.setVariants(hive.variants);
+    const cores = navigator.hardwareConcurrency || 4;
+    if (arenaOn) arena.start(Math.max(1, Math.min(4, Math.floor(cores / 2))));
+    else arena.stop();
+  }, [hive, arenaOn]);
 
   const last = chess.history({ verbose: true }).at(-1);
+  const fen = chess.fen();
   const legal: Square[] = useMemo(() => {
     if (!selected) return [];
     return chess.moves({ square: selected, verbose: true }).map((m) => m.to);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, chess.fen()]);
+  }, [selected, fen, chess]);
 
-  function startGame(side: Side, think: ThinkMode) {
+  async function askEngine() {
+    const pool = poolRef.current;
+    const variants = hive?.variants ?? [];
+    if (!pool || variants.length === 0) return;
+    const token = ++turnToken.current;
+    setPhase("engine");
+    setSelected(null);
+    const learned = level.learned ? await getLearned({ data: { fen: chess.fen() } }).catch(() => []) : [];
+    if (token !== turnToken.current) return;
+    const result = await pool.think(chess.fen(), level, variants, learned);
+    if (token !== turnToken.current || !result) return;
+    setDecision(result);
+    setProgress(result.progress);
+    const mv = result.move;
+    if (!mv) {
+      setPhase("over");
+      return;
+    }
+    try {
+      const played = chess.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
+      playTick(played.captured ? "capture" : "move");
+      refresh();
+      if (chess.isGameOver()) {
+        setPhase("over");
+        playTick("end");
+      } else setPhase("player");
+    } catch {
+      setPhase("player");
+    }
+  }
+
+  function startGame(side: Side) {
     chess.reset();
-    engineRef.current?.newGame();
+    poolRef.current?.newGame();
     setPlayerSide(side);
-    setMode(think);
     setFlipped(side === "b");
     setSelected(null);
     setPending(null);
     setProgress(null);
-    evolvedForPgn.current = null;
-    resignedRef.current = false;
+    setDecision(null);
     setScreen("play");
-    if (side === "b") {
-      setPhase("engine");
-      engineRef.current?.think(chess.fen(), think, genome);
-    } else {
-      setPhase("player");
-    }
+    setPhase("player");
     refresh();
-  }
-
-  function askEngine() {
-    setPhase("engine");
-    setSelected(null);
-    engineRef.current?.think(chess.fen(), mode, genome);
+    if (side === "b") void askEngine();
   }
 
   function applyMove(from: Square, to: Square, promotion?: PieceSymbol) {
@@ -177,7 +180,7 @@ export function JamesApp() {
         playTick("end");
         return;
       }
-      askEngine();
+      void askEngine();
     } catch {
       setSelected(null);
       setPending(null);
@@ -185,101 +188,75 @@ export function JamesApp() {
   }
 
   function onSquare(sq: Square) {
-    if (phase !== "player" || chess.turn() !== playerSide) return;
-    if (pending) return;
+    if (phase !== "player" || chess.turn() !== playerSide || pending) return;
     const piece = chess.get(sq);
     if (selected) {
       const dest = chess.moves({ square: selected, verbose: true }).find((m) => m.to === sq);
       if (dest) {
-        if (dest.promotion) {
-          setPending({ from: selected, to: sq });
-          return;
-        }
-        applyMove(selected, sq);
+        if (dest.promotion) setPending({ from: selected, to: sq });
+        else applyMove(selected, sq);
         return;
       }
     }
-    if (piece && piece.color === playerSide) setSelected(sq);
-    else setSelected(null);
+    setSelected(piece && piece.color === playerSide ? sq : null);
+  }
+
+  function cancelThinking() {
+    turnToken.current++;
+    poolRef.current?.stop();
   }
 
   function undo() {
-    if (phase === "engine") engineRef.current?.stop();
+    if (phase === "engine") cancelThinking();
     chess.undo();
     if (chess.turn() !== playerSide && chess.history().length) chess.undo();
     setPhase(chess.isGameOver() ? "over" : "player");
     setSelected(null);
     setProgress(null);
+    setDecision(null);
     refresh();
   }
 
   function resign() {
-    if (phase === "engine") engineRef.current?.stop();
-    resignedRef.current = true;
+    if (phase === "engine") cancelThinking();
     setPhase("over");
     playTick("end");
   }
 
+  const toggleArena = () => setArenaOn((on) => !on);
   const history = chess.history();
   const pairs: { n: number; w?: string; b?: string }[] = [];
-  for (let i = 0; i < history.length; i += 2) {
-    pairs.push({ n: i / 2 + 1, w: history[i], b: history[i + 1] });
-  }
+  for (let i = 0; i < history.length; i += 2) pairs.push({ n: i / 2 + 1, w: history[i], b: history[i + 1] });
 
   if (screen === "menu") {
     return (
-      <main className="mx-auto flex min-h-dvh max-w-3xl flex-col justify-center px-5 py-10">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted">
-          Hawthorne · Robinson · James
-        </p>
-        <h1 className="mt-3 font-display text-[clamp(2.6rem,8vw,4.6rem)] leading-[0.95] tracking-[-0.04em] text-fg">
-          James Engine
-        </h1>
-        <p className="mt-5 max-w-md text-pretty text-muted leading-relaxed">
-          A chess engine grown as a James Process. Positions reproduce after every edge,
-          transposition cycles compress the tree into a packed bit table, and the evaluation
-          genome mutates after each game. It does not move until the eval is sure.
-        </p>
-        <div className="mt-8 flex flex-wrap gap-2">
-          {(Object.keys(MODE_MS) as ThinkMode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              className={cn(
-                "h-10 rounded-full px-4 text-sm ring-1 ring-line",
-                mode === m ? "bg-accent text-accent-fg" : "bg-elevated text-muted hover:text-fg",
-              )}
-            >
-              {MODE_MS[m].label}
-            </button>
-          ))}
+      <main className="mx-auto grid min-h-dvh max-w-6xl items-center gap-10 px-5 py-10 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted">
+            v{ENGINE_VERSION} · Hawthorne · Robinson · James
+          </p>
+          <h1 className="mt-3 font-display text-[clamp(2.6rem,8vw,4.6rem)] leading-[0.95] tracking-[-0.04em] text-fg">
+            James Engine
+          </h1>
+          <p className="mt-5 max-w-lg text-pretty leading-relaxed text-muted">
+            A population of James processes that never stops. Variants play each other around the clock,
+            every game is stored and folded into a compressed position tree, the weakest are culled and
+            the strongest are bred together. Higher levels send more processes at once and refuse to settle
+            for a draw.
+          </p>
+          <div className="mt-8 max-w-lg rounded-[var(--radius-lg)] bg-surface p-5 ring-1 ring-line">
+            <LevelPicker value={levelNo} onChange={setLevelNo} />
+          </div>
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <Button size="lg" onClick={() => startGame("w")} className="sm:min-w-44" disabled={!hive}>
+              Play white
+            </Button>
+            <Button size="lg" variant="secondary" onClick={() => startGame("b")} className="sm:min-w-44" disabled={!hive}>
+              Play black
+            </Button>
+          </div>
         </div>
-        <p className="mt-2 font-mono text-xs text-subtle">{MODE_MS[mode].hint}</p>
-        <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-          <Button size="lg" onClick={() => startGame("w", mode)} className="sm:min-w-44">
-            Play white
-          </Button>
-          <Button size="lg" variant="secondary" onClick={() => startGame("b", mode)} className="sm:min-w-44">
-            Play black
-          </Button>
-        </div>
-        <dl className="mt-12 grid grid-cols-3 gap-4 border-t border-line pt-6 text-sm">
-          <div>
-            <dt className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle">Generation</dt>
-            <dd className="mt-1 font-display text-2xl">{genome.generation}</dd>
-          </div>
-          <div>
-            <dt className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle">Games</dt>
-            <dd className="mt-1 font-display text-2xl">{genome.games}</dd>
-          </div>
-          <div>
-            <dt className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle">W–L–D</dt>
-            <dd className="mt-1 font-display text-2xl">
-              {genome.wins}–{genome.losses}–{genome.draws}
-            </dd>
-          </div>
-        </dl>
+        <HivePanel hive={hive} arena={arenaStats} arenaOn={arenaOn} onToggle={toggleArena} />
       </main>
     );
   }
@@ -289,12 +266,14 @@ export function JamesApp() {
       <section className="relative">
         <header className="mb-4 flex items-end justify-between gap-3">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted">James Engine</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted">
+              Level {level.level} · {level.name}
+            </p>
             <h1 className="font-display text-2xl tracking-[-0.03em] md:text-3xl">
-              {statusText(chess, phase, playerSide)}
+              {statusText(chess, phase, playerSide, level.lanes)}
             </h1>
           </div>
-          <p className="font-mono text-xs text-subtle">gen {genome.generation}</p>
+          <p className="font-mono text-xs text-subtle">gen {hive?.topGeneration ?? 1}</p>
         </header>
         <div className="relative">
           <Board
@@ -316,7 +295,7 @@ export function JamesApp() {
           ) : null}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={undo} disabled={!history.length || phase === "engine"}>
+          <Button variant="secondary" size="sm" onClick={undo} disabled={!history.length}>
             <Undo2 className="size-4" />
             Undo
           </Button>
@@ -330,7 +309,7 @@ export function JamesApp() {
             variant="ghost"
             size="sm"
             onClick={() => {
-              engineRef.current?.stop();
+              cancelThinking();
               setScreen("menu");
               setPhase("player");
             }}
@@ -344,54 +323,35 @@ export function JamesApp() {
       <aside className="flex flex-col gap-4 pb-8 lg:sticky lg:top-6">
         <div className="rounded-[var(--radius-lg)] bg-surface p-4 ring-1 ring-line">
           <div className="flex items-baseline justify-between">
-            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted">Search</p>
-            <span className={cn("text-xs", progress?.sure ? "text-good" : "text-warn")}>
-              {phase === "engine" ? (progress?.sure ? "sure" : "growing") : phase === "over" ? "halted" : "idle"}
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted">Hive verdict</p>
+            <span className={cn("text-xs", phase === "engine" ? "text-warn" : "text-muted")}>
+              {phase === "engine" ? "searching" : decision ? `${Math.round(decision.consensus * 100)}% agree` : "idle"}
             </span>
           </div>
-          <p className="mt-2 font-display text-4xl tracking-[-0.04em] tabular-nums">{fmtScore(progress)}</p>
+          <p className="mt-2 font-display text-4xl tracking-[-0.04em] tabular-nums">
+            {progress ? fmtScore(progress.score, progress.mate) : "—"}
+          </p>
           <p className="mt-1 font-mono text-xs text-muted">
-            d{progress?.depth ?? 0} · sel {progress?.seldepth ?? 0} ·{" "}
-            {progress ? `${(progress.nodes / 1000).toFixed(1)}k` : "0"} n · {progress?.nps ?? 0} nps
+            d{progress?.depth ?? 0} · {((decision?.totalNodes ?? progress?.nodes ?? 0) / 1000).toFixed(1)}k nodes ·{" "}
+            {progress?.nps ?? 0} nps
           </p>
           <p className="mt-3 min-h-10 font-mono text-[12px] leading-relaxed text-fg/90">
-            {progress?.pv.length ? progress.pv.slice(0, 14).join("  ") : "Principal variation appears as the graph compresses."}
+            {progress?.pv.length ? progress.pv.slice(0, 12).join("  ") : "Principal variation appears here."}
           </p>
-          {progress?.james ? (
-            <dl className="mt-4 grid grid-cols-3 gap-2 border-t border-line pt-3 font-mono text-[11px]">
-              <div>
-                <dt className="text-subtle">James J</dt>
-                <dd>{progress.james.J ?? "—"}</dd>
-              </div>
-              <div>
-                <dt className="text-subtle">Robinson R</dt>
-                <dd>{progress.james.R}</dd>
-              </div>
-              <div>
-                <dt className="text-subtle">Cycles</dt>
-                <dd>{progress.james.cycles.toLocaleString()}</dd>
-              </div>
-              <div className="col-span-3 text-subtle">
-                Packed TT {(progress.james.packedBytes / 1024).toFixed(0)} KB · unique{" "}
-                {progress.james.unique.toLocaleString()}
-              </div>
-            </dl>
+          {decision?.lanes.length ? (
+            <ol className="mt-3 flex flex-col gap-1 border-t border-line pt-3 font-mono text-[11px]">
+              {decision.lanes.map((l, i) => (
+                <li key={i} className="grid grid-cols-[1fr_auto_auto] gap-2">
+                  <span className="truncate text-muted">{l.variant}</span>
+                  <span className="text-fg">{l.move ?? "—"}</span>
+                  <span className="w-12 text-right tabular-nums text-subtle">{fmtScore(l.score, null)}</span>
+                </li>
+              ))}
+            </ol>
           ) : null}
         </div>
 
         <JamesGraph progress={progress} thinking={phase === "engine"} />
-
-        <div className="rounded-[var(--radius-lg)] bg-surface p-4 ring-1 ring-line">
-          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted">Lineage</p>
-          <p className="mt-2 max-h-24 overflow-auto font-mono text-[11px] leading-relaxed text-muted">
-            {progress?.lineage.length
-              ? progress.lineage.slice(0, 40).join(" ")
-              : "After each iteration the process walks the principal line until a cycle, mate, or horizon."}
-          </p>
-          {progress?.lineageEnd ? (
-            <p className="mt-2 text-[11px] text-subtle">Ends in {progress.lineageEnd}</p>
-          ) : null}
-        </div>
 
         <div className="rounded-[var(--radius-lg)] bg-surface p-4 ring-1 ring-line">
           <p className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-muted">
@@ -409,6 +369,8 @@ export function JamesApp() {
             ))}
           </ol>
         </div>
+
+        <HivePanel hive={hive} arena={arenaStats} arenaOn={arenaOn} onToggle={toggleArena} compact />
       </aside>
     </main>
   );
