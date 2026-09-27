@@ -407,7 +407,13 @@ export function requestStop() {
   stopped = true;
 }
 
-export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: ThinkProgress) => void): ThinkProgress {
+export function think(
+  fen: string,
+  mode: ThinkMode,
+  g: Genome,
+  onProgress: (p: ThinkProgress) => void,
+  options: ThinkOptions = {},
+): ThinkProgress {
   genome = g;
   rootFen = fen;
   stopped = false;
@@ -422,9 +428,12 @@ export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: T
   const chess = new Chess(fen);
   const start = performance.now();
   const cfg = MODE_MS[mode];
-  deadline = start + cfg.max;
+  const minMs = Math.max(1, options.minMs ?? cfg.min);
+  const maxMs = Math.max(minMs, options.maxMs ?? cfg.max);
+  const maxDepth = options.maxDepth ?? (mode === "flash" ? 6 : mode === "standard" ? 12 : 48);
+  deadline = start + maxMs;
 
-  const book = bookMove(fen);
+  const book = options.allowBook === false ? null : bookMove(fen);
   if (book) {
     try {
       const mv = chess.move(book);
@@ -438,7 +447,6 @@ export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: T
     }
   }
 
-  const maxDepth = mode === "flash" ? 6 : mode === "standard" ? 12 : 48;
   let bestMove: EngineMove | null = null;
   let bestScore = 0;
   let lastScores: number[] = [];
@@ -448,8 +456,7 @@ export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: T
   for (let depth = 1; depth <= maxDepth; depth++) {
     if (stopped) break;
     const elapsed = performance.now() - start;
-    if (elapsed >= cfg.max && depth > 1) break;
-    if (mode !== "sure" && elapsed >= cfg.max && depth > 1) break;
+    if (elapsed >= maxMs && depth > 1) break;
 
     const score = search(chess, depth, -INF, INF, 0, false);
     if (stopped && depth > 1) break;
@@ -496,7 +503,7 @@ export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: T
     }
 
     let sure = Math.abs(score) > MATE_GATE;
-    if (mode === "sure" && depth >= 5 && elapsed >= cfg.min) {
+    if (mode === "sure" && options.stopOnStable !== false && depth >= 5 && elapsed >= minMs) {
       const tail = lastScores.slice(-3);
       if (tail.length === 3 && tail.every((s) => Math.abs(s - tail[0]!) < 22)) sure = true;
     }
@@ -508,9 +515,9 @@ export function think(fen: string, mode: ThinkMode, g: Genome, onProgress: (p: T
     }
 
     if (Math.abs(score) > MATE_GATE) return { ...snap, sure: true };
-    if (mode === "sure" && sure && elapsed >= cfg.min) return snap;
-    if (mode !== "sure" && elapsed >= cfg.max && depth >= 2) return { ...snap, sure: true };
-    if (mode !== "sure" && elapsed >= cfg.min && depth >= (mode === "flash" ? 3 : 5)) {
+    if (mode === "sure" && options.stopOnStable !== false && sure && elapsed >= minMs) return snap;
+    if (elapsed >= maxMs && depth >= 2) return { ...snap, sure: true };
+    if (elapsed >= minMs && depth >= (mode === "flash" ? 3 : 5)) {
       /* keep iterating until max, but report not-final until the last loop */
     }
   }
