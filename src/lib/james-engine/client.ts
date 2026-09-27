@@ -1,7 +1,7 @@
-import type { Genome, ThinkMode, ThinkProgress, WorkerIn, WorkerOut } from "./types";
+import type { Genome, ThinkMode, ThinkOptions, ThinkProgress, WorkerIn, WorkerOut } from "./types";
 
 export type EngineHandle = {
-  think: (fen: string, mode: ThinkMode, genome: Genome) => void;
+  think: (fen: string, mode: ThinkMode, genome: Genome, options?: ThinkOptions) => void;
   stop: () => void;
   newGame: () => void;
   terminate: () => void;
@@ -24,7 +24,7 @@ export function createEngine(handlers: {
   const send = (msg: WorkerIn) => worker.postMessage(msg);
 
   return {
-    think: (fen, mode, genome) => send({ type: "think", req: { fen, mode, genome } }),
+    think: (fen, mode, genome, options) => send({ type: "think", req: { fen, mode, genome, options } }),
     stop: () => send({ type: "stop" }),
     newGame: () => send({ type: "newGame" }),
     terminate: () => worker.terminate(),
