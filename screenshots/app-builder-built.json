@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "James Engine",
+      "hasCanvas": false,
+      "bodyTextLen": 383,
+      "bodyTextHash": "2547934dfe21b60e5ce9638ad6bca00fd4b420064beae2aba69edd1838af53cb",
+      "bodyTextPrefix": "HAWTHORNE · ROBINSON · JAMES James Engine A chess engine grown a",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "James Engine",
+      "hasCanvas": false,
+      "bodyTextLen": 383,
+      "bodyTextHash": "2547934dfe21b60e5ce9638ad6bca00fd4b420064beae2aba69edd1838af53cb",
+      "bodyTextPrefix": "HAWTHORNE · ROBINSON · JAMES James Engine A chess engine grown a",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}
